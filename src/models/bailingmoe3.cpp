@@ -3,6 +3,17 @@
 
 #include <algorithm>
 
+// Ling checkpoints rotate adjacent rotary pairs (2i, 2i + 1), but M-RoPE rotates NEOX pairs
+// (i, i + n_rot / 2). De-interleave the rotary dims [x0 x1 x2 x3 ...] -> [x0 x2 ... | x1 x3 ...]
+// so the pairs match. Applied to both q and k, so q . k and the cached keys are unchanged.
+static ggml_tensor * bailingmoe3_rope_deinterleave(ggml_context * ctx, ggml_tensor * x) {
+    const int64_t n_rot = x->ne[0], n_head = x->ne[1], n_tokens = x->ne[2];
+    x = ggml_cont(ctx, x);
+    x = ggml_reshape_4d(ctx, x, 2, n_rot / 2, n_head, n_tokens);
+    x = ggml_cont(ctx, ggml_permute(ctx, x, 1, 0, 2, 3));
+    return ggml_reshape_3d(ctx, x, n_rot, n_head, n_tokens);
+}
+
 void llama_model_bailingmoe3::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,      hparams.f_norm_rms_eps);
     ml.get_key(LLM_KV_ATTENTION_KEY_LENGTH_MLA,         hparams.n_embd_head_k_mla_impl);
@@ -303,6 +314,10 @@ llama_model_bailingmoe3::graph::graph(const llm_graph_params & params) :
                     ggml_row_size(kv_all->type, kv_lora_rank + qk_rope_head_dim),
                     ggml_row_size(kv_all->type, kv_lora_rank));
 
+            if (hparams.use_mrope()) {
+                q_pe = bailingmoe3_rope_deinterleave(ctx0, q_pe);
+                k_pe = bailingmoe3_rope_deinterleave(ctx0, k_pe);
+            }
             q_pe = build_rope(q_pe, inp_pos, il);
             k_pe = build_rope(k_pe, inp_pos, il);
             kv = build_norm(kv, layer.attn_kv_a_norm, nullptr, LLM_NORM_RMS, il);
@@ -456,6 +471,10 @@ llama_model_bailingmoe3::graph_mtp::graph_mtp(const llm_graph_params & params) :
             ggml_row_size(kv_all->type, kv_lora_rank + qk_rope_head_dim),
             ggml_row_size(kv_all->type, kv_lora_rank));
 
+    if (hparams.use_mrope()) {
+        q_pe = bailingmoe3_rope_deinterleave(ctx0, q_pe);
+        k_pe = bailingmoe3_rope_deinterleave(ctx0, k_pe);
+    }
     q_pe = build_rope(q_pe, inp_pos, il);
     k_pe = build_rope(k_pe, inp_pos, il);
     kv = build_norm(kv, layer.attn_kv_a_norm, nullptr, LLM_NORM_RMS, il);
